@@ -1,0 +1,5 @@
+*.prof
+/solution/*/goroutineleak-ja
+/skeleton/*/goroutineleak-ja
+/solution/*/server
+/skeleton/*/server
