@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          # go.modのgoディレクティブ(1.27.1)は、GOTOOLCHAIN=autoにより
+          # go.modのgoディレクティブ(1.27.2)は、GOTOOLCHAIN=autoにより
           # goコマンドが自動でダウンロードするため、ここでは安定版を入れる。
           go-version: stable
           cache-dependency-path: '**/go.sum'

@@ -9,17 +9,17 @@
 
 このハンズオンを行うには、以下の準備が必要です。
 
-* Go 1.27.1以上のインストール
+* Go 1.27.2以上のインストール
 
 インストールされているGoのバージョンは、`go version`コマンドで確認できます。
 
-Go 1.21以上がインストールされていれば、各ステップの`go.mod`の`go`ディレクティブに従って、`go`コマンドが自動でGo 1.27.1のツールチェーンをダウンロードして使います（[Go Toolchains](https://go.dev/doc/toolchain)）。
+Go 1.21以上がインストールされていれば、各ステップの`go.mod`の`go`ディレクティブに従って、`go`コマンドが自動でGo 1.27.2のツールチェーンをダウンロードして使います（[Go Toolchains](https://go.dev/doc/toolchain)）。
 そのため、通常は追加の作業は必要ありません。
 明示的にインストールしたい場合は、次のコマンドでインストールできます。
 
 ```
-$ go install golang.org/dl/go1.27.1@latest
-$ go1.27.1 download
+$ go install golang.org/dl/go1.27.2@latest
+$ go1.27.2 download
 ```
 
 ## 学べることと学べないこと

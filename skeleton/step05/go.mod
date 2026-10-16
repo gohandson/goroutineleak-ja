@@ -1,6 +1,6 @@
 module github.com/gohandson/goroutineleak-ja
 
-go 1.27.1
+go 1.27.2
 
 require go.uber.org/goleak v1.3.0
 
