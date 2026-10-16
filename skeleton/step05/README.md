@@ -1,127 +1,150 @@
-# STEP 05: コンテキストでキャンセルしよう
+# STEP 05: pprofで見つけよう
 
 ## このステップで学ぶこと
 
-STEP 04では、チャネルにバッファを持たせることでリークを直しました。
-しかし、まだ改善できる点があります。
-最初の結果が返ったあとも、遅いバックエンドへの問い合わせは、最後まで続いているのです。
-結果が捨てられるだけの処理に、CPUやネットワークなどのリソースを使い続けるのは無駄です。
+STEP 03では、goleakを使ってテストの中でリークを見つけました。
+しかし、テストでは再現しなかったリークが、本番で動いているプログラムでだけ起きることもあります。
 
-STEP 05では、`context.Context`を使って、残りのバックエンドの処理を中断できるようにします。
+Go 1.27から、リークしたゴールーチンだけを報告するプロファイル、`goroutineleak`プロファイルが使えるようになりました。
+STEP 05では、リークするサーバを動かし、このプロファイルでリークを見つけます。
 その過程で、次のことを学びます。
 
-* `context.WithCancel`関数によるキャンセルの伝え方
-* キャンセルだけではリークが防げない理由
-* キャンセルを受けて戻るバックエンドの書き方
+* `net/http/pprof`パッケージによるpprofエンドポイントの公開
+* `goroutineleak`プロファイルの取得と、`go tool pprof`での読み方
+* 通常の`goroutine`プロファイルとの違い
 
-## 最初の結果が返ったらキャンセルする
+## goroutineleakプロファイルの仕組み
 
-`Backend`型は、`context.Context`を受け取ります。
-`First`関数が戻るときに、このコンテキストをキャンセルすれば、残りのバックエンドに「もう結果はいらない」と伝えられます。
+これまでも、`goroutine`プロファイルを使えば、プログラムが動いている最中のゴールーチンの一覧を見ることができました。
+しかし、`goroutine`プロファイルには、リークしているゴールーチンと、たまたま一時的にブロックしているだけのゴールーチンの区別がありません。
+たとえば、アクセスが増えて、大量のリクエストが一時的にDBの応答待ちでブロックしているだけの場合でも、同じように並びます。
 
-```go
-func First(ctx context.Context, query string, backends []Backend) (string, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+`goroutineleak`プロファイルは、ガベージコレクション（GC）の仕組みを使って、リークしているゴールーチンだけを見つけます。
+考え方は次のとおりです。
 
-	ch := make(chan result, len(backends))
-	// ...
-}
-```
+* ブロックしていないゴールーチンは、動き続けられるので、リークしていない
+* ブロックしているゴールーチンでも、それが待っているチャネルなどを、動き続けられるゴールーチンが参照していれば、いずれ待ちが解消される可能性があるので、リークしていない
+* 上のどちらにも当てはまらないゴールーチン、つまり、待っているチャネルなどを動けるゴールーチンから誰も参照できなくなったものは、永遠に待ち続けるのでリークしている
 
-`context.WithCancel`関数は、引数のコンテキストの子になるコンテキストと、それをキャンセルする`cancel`関数を返します。
-`defer cancel()`としておくと、`First`関数がどのように戻っても、その時点で子のコンテキストがキャンセルされます。
-呼び出し元から渡された`ctx`がキャンセルされた場合も、子のコンテキストはキャンセルされます。
+誰も参照していないチャネルを待っているゴールーチンは、確実にリークしているといえます。
+そのため、`goroutineleak`プロファイルでは、リークしていないものがリークとして報告される誤検出は、ほとんど起きないよう設計されています。
 
-`TODO`コメントに従って、`search/search.go`を修正してください。
+一方で、検出できるリークの種類は限られています。
+どのようなリークが検出できて、どのようなリークが検出できないかは、STEP 08で試します。
 
-## キャンセルを受けて戻るバックエンド
+## pprofのエンドポイントを公開する
 
-`First`関数がキャンセルしても、バックエンドの側がキャンセルに対応していなければ、処理は止まりません。
-`context.Context`は、「キャンセルされたことを知らせる」しくみであって、ゴールーチンを強制的に止めるしくみではないからです。
+`net/http/pprof`パッケージをインポートすると、`http.DefaultServeMux`に`/debug/pprof/`以下のハンドラが登録されます。
+`goroutineleak`プロファイルも、Go 1.27以降では、このパッケージをインポートするだけで`/debug/pprof/goroutineleak`から取得できるようになります。
 
-STEP 04までのバックエンドは、`time.Sleep`関数で待っていたので、キャンセルを無視していました。
-このステップのテストでは、`select`文で、時間が経つのと、キャンセルされるのを同時に待つようにしています。
+`cmd/server/main.go`は、`search.First`関数を100ミリ秒ごとに繰り返し呼び出すサーバです。
+バックエンドは10ミリ秒、50ミリ秒、50ミリ秒かかる3つで、`First`関数を呼び出すたびに、遅い2つのゴールーチンがリークします。
 
-```go
-func backend(d time.Duration, v string) search.Backend {
-	return func(ctx context.Context, query string) (string, error) {
-		select {
-		case <-time.After(d):
-			return v, nil
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
-	}
-}
-```
+`TODO`コメントに従って、次の処理を追加してください。
 
-`ctx.Done()`は、コンテキストがキャンセルされると閉じられるチャネルです。
-キャンセルされたら、`ctx.Err()`を返して、速やかに戻ります。
-実際のバックエンドでは、`http.NewRequestWithContext`関数や、`database/sql`パッケージの`QueryContext`メソッドなど、コンテキストを受け取るAPIに`ctx`を渡すことで、同じことを実現します。
+1. `net/http/pprof`パッケージを、`_`をつけて空白インポートする（`net/http`パッケージのインポートも必要です）
+2. 別のゴールーチンで、`http.ListenAndServe`関数を使って`localhost:6060`で待ち受ける
 
-`cmd/server/main.go`のバックエンドも、同じようにキャンセルに対応させてあります。
-
-## バッファは必要なままか
-
-キャンセルされたバックエンドは、`ctx.Err()`を返して終了しますが、その結果も`ch`に送信しようとします。
-つまり、`ch`のバッファがなければ、キャンセルされたバックエンドの結果の送信が、再びブロックしてしまいます。
-
-`First`関数が受信する回数は1回だけなので、`ch`のバッファはこのステップでも必要です。
-キャンセルは「無駄な処理を早く終わらせる」ためのもので、リークを防ぐのはバッファの役割です。
-2つの修正は、役割が違い、どちらも必要です。
+`http.ListenAndServe`関数は、第2引数に`nil`を渡すと`http.DefaultServeMux`を使います。
+エラーが返ってきたときは、`log.Println`関数で出力してください。
 
 ## 動かす
 
-テストを実行します。
-このステップのテストには、`TestFirst`に加えて、`TestFirst_cancel`が追加されています。
-`TestFirst_cancel`は、`ctx`がキャンセルされるまで戻らないバックエンドを2つ渡して、`First`関数が戻ったあとに、そのバックエンドにキャンセルが伝わることを確かめます。
-
-```
-$ go test -race ./...
-```
-
-次のように、`ok`と表示されれば成功です。
-
-```
-ok  	github.com/gohandson/goroutineleak-ja/search	1.0s
-```
-
-サーバも、これまでと同じように起動して、プロファイルを確認できます。
+サーバを起動します。
 
 ```
 $ go run ./cmd/server
 ```
 
+起動したまま、別のターミナルを開いて、`goroutineleak`プロファイルを取得します。
+
+```
+$ curl -o leak.prof http://localhost:6060/debug/pprof/goroutineleak
+```
+
+取得したプロファイルは、`go tool pprof`で調べられます。
+`-list`には正規表現を渡し、一致する関数のソースコードに、サンプル数を重ねて表示できます。
+
+```
+$ go tool pprof -list 'search.First' leak.prof
+```
+
+次のように、`ch <- result{val: v, err: err}`の行にサンプルが集まっていれば成功です。
+`Total`の数は、取得した時点までにリークしたゴールーチン数なので、実行するたびに変わります。
+
+```
+Total: 54
+ROUTINE ======================== github.com/gohandson/goroutineleak-ja/search.First.func1 in .../search/search.go
+         0         54 (flat, cum)   100% of Total
+         .          .     19:		go func() {
+         .          .     20:			v, err := b(ctx, query)
+         .         54     21:			ch <- result{val: v, err: err}
+         .          .     22:		}()
+```
+
+この結果から、リークの原因が`ch`への送信であることが分かります。
+
+テキスト形式で内容を確認したいときは、`debug=1`をつけて取得します。
+
 ```
 $ curl 'http://localhost:6060/debug/pprof/goroutineleak?debug=1'
-goroutineleak profile: total 0
 ```
+
+`goroutineleak profile: total 54`のような見出しに続いて、スタックトレースごとにゴールーチン数が並びます。
+
+ブラウザで http://localhost:6060/debug/pprof/ を開いて、`goroutineleak`のリンクから確認することもできます。
+
+## 通常のgoroutineプロファイルと比べる
+
+同じサーバから、通常の`goroutine`プロファイルも取得して、比べてみましょう。
+
+```
+$ curl 'http://localhost:6060/debug/pprof/goroutine?debug=1' | head -20
+```
+
+`goroutine`プロファイルには、リークしたゴールーチンのほかに、pprofのHTTPサーバのゴールーチンや、`main`関数のゴールーチンなど、リークしていないゴールーチンも含まれます。
+一方、`goroutineleak`プロファイルには、リークしたゴールーチンだけが含まれます。
+
+しばらく待ってから、再度`goroutineleak`プロファイルを取得すると、`Total`の数が増えていることも確認できます。
+`First`関数は100ミリ秒ごとに呼び出されて、そのたびに2つずつリークするためです。
+このように、リークは時間が経つほど増えていきます。
 
 ## 考えてみよう
 
-* `defer cancel()`を書かなかった場合、何が起きるか。`go vet`は何を報告するか
-* バッファを`make(chan result)`に戻すと、`TestFirst`と`TestFirst_cancel`はそれぞれどうなるか（試してみましょう）
-* バックエンドがキャンセルを無視する実装だったら、`First`関数をどう書けばリークを防げるか
-* `First`関数は、最初に返ってきた結果がエラーでも、それを返してしまう。最初の成功した結果を返すようにするには、どう書き換えればよいか
+* どの行でリークしているか
+* 時間が経つと数はどう変わるか
+* 通常の`goroutine`プロファイルと何が違うか
+* pprofのエンドポイントを本番環境で公開するときに、気をつけるべきことは何か
 
 ## トラブルシューティング
 
-### `TestFirst_cancel`が「バックエンドにキャンセルが伝わっていません」で失敗する
+### ポート6060がすでに使われている
 
-`First`関数の中で、`context.WithCancel`関数で作った子のコンテキストを、バックエンドに渡しているか確認してください。
-`ctx, cancel := context.WithCancel(ctx)`のように、同じ名前の変数で上書きすると、以降の`b(ctx, query)`に子のコンテキストが渡されます。
+`address already in use`というログが出る場合は、前に起動したサーバが残っているか、別のプログラムがポート6060を使っています。
+前のステップで起動したサーバを`Ctrl+C`で止め忘れていないか確認してください。
 
-### `go vet`が`lostcancel`を報告する
+### goroutineleakプロファイルが空になる
 
-`context.WithCancel`関数が返す`cancel`関数は、必ず呼び出す必要があります。
-`defer cancel()`が書かれているか確認してください。
+起動した直後は、まだリークが発生していません。
+数秒待ってから取得してください。
+また、Goのバージョンが1.27以上であることを`go version`で確認してください。
+
+### `go test ./...`が失敗する
+
+STEP 03で追加した`goleak`のテストは、まだリークを直していないため、このステップでも失敗します。
+リークの修正は、次のSTEP 06で行います。
+
+### サーバが止まらない
+
+`go run ./cmd/server`で起動したサーバは、`Ctrl+C`で止められます。
 
 ## 参考文献
 
-* [Go Concurrency Patterns: Context - The Go Blog](https://go.dev/blog/context)
-* [context - pkg.go.dev](https://pkg.go.dev/context)
 * [Goroutine Leak Profiles - The Go Blog](https://go.dev/blog/goroutine-leak-profiles)
+* [net/http/pprof - pkg.go.dev](https://pkg.go.dev/net/http/pprof)
+* [runtime/pprof - pkg.go.dev](https://pkg.go.dev/runtime/pprof)
+* [Profiling Go Programs - The Go Blog](https://go.dev/blog/pprof)
+* [pprof - GitHub](https://github.com/google/pprof)
 
 ---
 

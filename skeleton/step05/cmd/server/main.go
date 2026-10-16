@@ -3,31 +3,21 @@ package main
 import (
 	"context"
 	"log"
-	"net/http"
-	_ "net/http/pprof"
 	"time"
 
 	"github.com/gohandson/goroutineleak-ja/search"
 )
 
-// backend はd後にvを返すバックエンドを返す。
-// ctxがキャンセルされたら、待つのをやめて戻る。
 func backend(d time.Duration, v string) search.Backend {
 	return func(ctx context.Context, query string) (string, error) {
-		select {
-		case <-time.After(d):
-			return v, nil
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
+		time.Sleep(d)
+		return v, nil
 	}
 }
 
 func main() {
-	// pprofのエンドポイントを公開する
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
+	// TODO: net/http/pprof パッケージを空白インポートする
+	// TODO: pprofのエンドポイントを公開するため、別のゴールーチンで localhost:6060 を http.ListenAndServe 関数で待ち受ける
 
 	backends := []search.Backend{
 		backend(10*time.Millisecond, "fast"),

@@ -14,7 +14,7 @@ type result struct {
 // First はすべてのバックエンドに並行して問い合わせ、
 // 最初に返ってきた結果を返す。
 func First(ctx context.Context, query string, backends []Backend) (string, error) {
-	ch := make(chan result, len(backends))
+	ch := make(chan result)
 	for _, b := range backends {
 		go func() {
 			v, err := b(ctx, query)

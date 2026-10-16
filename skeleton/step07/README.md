@@ -1,91 +1,130 @@
-# STEP 07: 本番で監視しよう
+# STEP 07: コンテキストでキャンセルしよう
 
 ## このステップで学ぶこと
 
-STEP 03では、手動で`curl`して`goroutineleak`プロファイルを取得しました。
-しかし本番では、リークがいつ起きるか分からないので、一度取得するだけでは足りません。
-プロファイルを定期的に取得し、リークの有無を継続的に監視する必要があります。
+STEP 06では、チャネルにバッファを持たせることでリークを直しました。
+しかし、まだ改善できる点があります。
+最初の結果が返ったあとも、遅いバックエンドへの問い合わせは、最後まで続いているのです。
+結果が捨てられるだけの処理に、CPUやネットワークなどのリソースを使い続けるのは無駄です。
 
-STEP 07では、継続的プロファイラであるDatadogを例に、その考え方を学びます。
-このステップにはコードを書く演習はありません。
+STEP 07では、`context.Context`を使って、残りのバックエンドの処理を中断できるようにします。
 その過程で、次のことを学びます。
 
-* 継続的プロファイリングでリークを監視する考え方
-* dd-trace-goで`goroutineleak`プロファイルを有効にする方法
-* `goroutineleak`プロファイルを定期的に取得するときの注意点
+* `context.WithCancel`関数によるキャンセルの伝え方
+* キャンセルだけではリークが防げない理由
+* キャンセルを受けて戻るバックエンドの書き方
 
-## 継続的プロファイリング
+## 最初の結果が返ったらキャンセルする
 
-継続的プロファイリングとは、本番で動いているプログラムから、CPUやヒープなどのプロファイルを、一定の間隔で自動的に取得して、集めて見られるようにしておくしくみです。
-リークは、時間が経つほど悪化するため、定期的に取得することで次のことが分かります。
-
-* いつからリークが始まったか
-* どのデプロイが原因か
-* リークしたゴールーチンの数が、どのように増えているか
-
-`goroutineleak`プロファイルは、本番でも、誤検出をほとんど気にせずに使えるよう設計されています。
-そのため、継続的プロファイラで取得して監視するのに向いています。
-
-## DatadogのGoroutineLeakProfile
-
-Datadogの継続的プロファイラ（dd-trace-goの`profiler`パッケージ）にも、`GoroutineLeakProfile`というプロファイルタイプが追加されています。
-次のように、`profiler.WithProfileTypes`関数に指定して有効にします。
+`Backend`型は、`context.Context`を受け取ります。
+`First`関数が戻るときに、このコンテキストをキャンセルすれば、残りのバックエンドに「もう結果はいらない」と伝えられます。
 
 ```go
-import "github.com/DataDog/dd-trace-go/v2/profiler"
+func First(ctx context.Context, query string, backends []Backend) (string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-func main() {
-	err := profiler.Start(
-		profiler.WithProfileTypes(
-			profiler.CPUProfile,
-			profiler.HeapProfile,
-			profiler.GoroutineLeakProfile,
-		),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer profiler.Stop()
-
+	ch := make(chan result, len(backends))
 	// ...
 }
 ```
 
-注意点は次のとおりです。
+`context.WithCancel`関数は、引数のコンテキストの子になるコンテキストと、それをキャンセルする`cancel`関数を返します。
+`defer cancel()`としておくと、`First`関数がどのように戻っても、その時点で子のコンテキストがキャンセルされます。
+呼び出し元から渡された`ctx`がキャンセルされた場合も、子のコンテキストはキャンセルされます。
 
-* デフォルトで有効なのはCPUとヒープなどに限られるので、`GoroutineLeakProfile`は、`WithProfileTypes`関数で明示的に指定する必要がある
-* `WithProfileTypes`関数に指定したプロファイルだけが有効になるので、これまで有効にしていたプロファイルも、あわせて指定する
-* Go 1.27以降が必要（Go 1.26でも、`GOEXPERIMENT=goroutineleakprofile`をつけてビルドすれば取得できる）
-* 本書の執筆時点では、`GoroutineLeakProfile`はdd-trace-goのv2.11.0から利用できる。それより前のバージョン（v2.10.1など）には含まれていない
+`TODO`コメントに従って、`search/search.go`を修正してください。
 
-## 取得する頻度
+## キャンセルを受けて戻るバックエンド
 
-`goroutineleak`プロファイルの取得は、通常のGCよりもコストがかかる場合があります。
-一方で、リークは一度起きたら、その後も観測できるため、毎秒のように取得する必要はありません。
-Goのブログでは、たとえば4時間に1回のように、頻度を下げても、リークを検出する能力はほとんど落ちないと説明されています。
+`First`関数がキャンセルしても、バックエンドの側がキャンセルに対応していなければ、処理は止まりません。
+`context.Context`は、「キャンセルされたことを知らせる」しくみであって、ゴールーチンを強制的に止めるしくみではないからです。
 
-## ここまでの使い分け
+STEP 06までのバックエンドは、`time.Sleep`関数で待っていたので、キャンセルを無視していました。
+このステップのテストでは、`select`文で、時間が経つのと、キャンセルされるのを同時に待つようにしています。
 
-このハンズオンで学んだツールを、まとめます。
+```go
+func backend(d time.Duration, v string) search.Backend {
+	return func(ctx context.Context, query string) (string, error) {
+		select {
+		case <-time.After(d):
+			return v, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+}
+```
 
-* `go test`とgoleak: テストの中で、ブロックの理由を問わず、残ったゴールーチンを見つける
-* `goroutineleak`プロファイルを手動で取得: 動いているサーバの、確実にリークといえるゴールーチンを、その場で調べる
-* 継続的プロファイラ: `goroutineleak`プロファイルを定期的に取得し、リークの発生や増加を継続的に監視する
-* `goroutine`プロファイル: `goroutineleak`プロファイルでは見つからない、I/Oやグローバル変数に由来するリークを、ゴールーチン数の推移から疑う
+`ctx.Done()`は、コンテキストがキャンセルされると閉じられるチャネルです。
+キャンセルされたら、`ctx.Err()`を返して、速やかに戻ります。
+実際のバックエンドでは、`http.NewRequestWithContext`関数や、`database/sql`パッケージの`QueryContext`メソッドなど、コンテキストを受け取るAPIに`ctx`を渡すことで、同じことを実現します。
+
+`cmd/server/main.go`のバックエンドも、同じようにキャンセルに対応させてあります。
+
+## バッファは必要なままか
+
+キャンセルされたバックエンドは、`ctx.Err()`を返して終了しますが、その結果も`ch`に送信しようとします。
+つまり、`ch`のバッファがなければ、キャンセルされたバックエンドの結果の送信が、再びブロックしてしまいます。
+
+`First`関数が受信する回数は1回だけなので、`ch`のバッファはこのステップでも必要です。
+キャンセルは「無駄な処理を早く終わらせる」ためのもので、リークを防ぐのはバッファの役割です。
+2つの修正は、役割が違い、どちらも必要です。
+
+## 動かす
+
+テストを実行します。
+このステップのテストには、`TestFirst`に加えて、`TestFirst_cancel`が追加されています。
+`TestFirst_cancel`は、`ctx`がキャンセルされるまで戻らないバックエンドを2つ渡して、`First`関数が戻ったあとに、そのバックエンドにキャンセルが伝わることを確かめます。
+
+```
+$ go test -race ./...
+```
+
+次のように、`ok`と表示されれば成功です。
+
+```
+ok  	github.com/gohandson/goroutineleak-ja/search	1.0s
+```
+
+サーバも、これまでと同じように起動して、プロファイルを確認できます。
+
+```
+$ go run ./cmd/server
+```
+
+```
+$ curl 'http://localhost:6060/debug/pprof/goroutineleak?debug=1'
+goroutineleak profile: total 0
+```
 
 ## 考えてみよう
 
-* 自分のプロダクトで、`goroutineleak`プロファイルを定期的に取得するとしたら、どのくらいの頻度にするか
-* リークを検知したときに、通知するしきい値は、どう決めるか
-* リークを見つけた後、修正の確認にはどのツールを使うか
+* `defer cancel()`を書かなかった場合、何が起きるか。`go vet`は何を報告するか
+* バッファを`make(chan result)`に戻すと、`TestFirst`と`TestFirst_cancel`はそれぞれどうなるか（試してみましょう）
+* バックエンドがキャンセルを無視する実装だったら、`First`関数をどう書けばリークを防げるか
+* `First`関数は、最初に返ってきた結果がエラーでも、それを返してしまう。最初の成功した結果を返すようにするには、どう書き換えればよいか
+
+## トラブルシューティング
+
+### `TestFirst_cancel`が「バックエンドにキャンセルが伝わっていません」で失敗する
+
+`First`関数の中で、`context.WithCancel`関数で作った子のコンテキストを、バックエンドに渡しているか確認してください。
+`ctx, cancel := context.WithCancel(ctx)`のように、同じ名前の変数で上書きすると、以降の`b(ctx, query)`に子のコンテキストが渡されます。
+
+### `go vet`が`lostcancel`を報告する
+
+`context.WithCancel`関数が返す`cancel`関数は、必ず呼び出す必要があります。
+`defer cancel()`が書かれているか確認してください。
 
 ## 参考文献
 
+* [Go Concurrency Patterns: Context - The Go Blog](https://go.dev/blog/context)
+* [context - pkg.go.dev](https://pkg.go.dev/context)
 * [Goroutine Leak Profiles - The Go Blog](https://go.dev/blog/goroutine-leak-profiles)
-* [Datadog Continuous Profiler - Datadog Docs](https://docs.datadoghq.com/profiler/)
-* [dd-trace-go profiler - pkg.go.dev](https://pkg.go.dev/github.com/DataDog/dd-trace-go/v2/profiler)
 
 ---
 
 - 解答例: [`solution/step07`](../../solution/step07)
 - 前のステップ: [STEP 06](../step06)
+- 次のステップ: [STEP 08](../step08)

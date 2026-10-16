@@ -1,129 +1,175 @@
-# STEP 02: goleakで見つけよう
+# STEP 02: NumGoroutineで見つけよう
 
 ## このステップで学ぶこと
 
-STEP 01では、`runtime.NumGoroutine`関数でゴールーチン数を比べて、リークを確認しました。
-しかしこの方法では、リークしたことは分かっても、どのゴールーチンがどこでリークしているのかまでは分かりません。
-また、他のゴールーチンの増減に影響されるため、テストの自動チェックには向きません。
-
-STEP 02では、[goleak](https://github.com/uber-go/goleak)というライブラリを使って、テストの中でゴールーチンリークを検出します。
+STEP 01では、`runtime.NumGoroutine`関数の値をログに出して、ゴールーチンがリークしていることを目で確認しました。
+STEP 02では、これを自動化し、リークを検出するテストを書きます。
+また、動いているサーバのゴールーチン数を公開して、推移を観察します。
 その過程で、次のことを学びます。
 
-* goleakの使い方
-* goleakが検出する仕組みと、検出できるタイミング
-* テストで見つけられるリークと、本番で動くプログラムのリークの違い
+* `runtime.NumGoroutine`関数を使った、リークを検出するテストの書き方
+* ゴールーチンの終了を待つ必要がある理由
+* `expvar`パッケージによる、ゴールーチン数の公開
+* ゴールーチン数を数える方法の限界
 
-## goleakを取得する
+## テストでリークを検出する
 
-goleakは、テストが終わったあとに終了していないゴールーチンが残っていないかを調べるライブラリです。
-Uberが公開しています。
-
-まず、goleakを取得します。
-
-```
-$ go get go.uber.org/goleak
-```
-
-`go.mod`に`go.uber.org/goleak`が追加されます。
-
-## テストにgoleakを追加する
-
-`search/search_test.go`に`go.uber.org/goleak`のインポートを追加します。
-そして、`TestFirst`関数の先頭に、次の1行を追加します。
+`runtime.NumGoroutine`関数は、いま存在するゴールーチンの数を返します。
+そこで、検出したい処理の実行前と実行後でゴールーチン数を比べ、増えていればリークしていると判断できます。
 
 ```go
-defer goleak.VerifyNone(t)
+before := runtime.NumGoroutine()
+
+// 検出したい処理を実行する
+
+after := runtime.NumGoroutine()
+if after > before {
+	t.Errorf("ゴールーチンがリークしています: 実行前=%d, 実行後=%d", before, after)
+}
 ```
 
-`goleak.VerifyNone`関数は、呼び出された時点で動いているゴールーチンを調べ、テストの実行中に起動されて、まだ終了していないゴールーチンがあれば、テストを失敗させます。
-`defer`で呼び出しているため、`TestFirst`関数が終わるときに検査が行われます。
+## ゴールーチンの終了を待つ
 
-なお、STEP 01で追加した`runtime.NumGoroutine`関数による確認は、このステップでは使いません。
-このステップの`TestFirst`関数は、ゴールーチン数の確認の代わりに`goleak.VerifyNone`関数を使います。
+しかし、このまま書くと、リークしていなくてもテストが失敗してしまうことがあります。
+ゴールーチンは、処理が終わった直後にすぐ消えるとは限らないからです。
+
+たとえば、STEP 01で見たとおり、`search.First`関数は、遅いバックエンドの処理が終わっていなくても戻ります。
+その時点では、遅いバックエンドのゴールーチンはまだ動いているので、ゴールーチン数は実行前より多くなっています。
+しばらく待てば、ゴールーチンは終了して、数は元に戻ります。
+本当にリークしているなら、いくら待っても数は元に戻りません。
+
+そこで、ゴールーチン数が実行前の数以下に戻るのを、上限の時間まで待つ関数を用意します。
+
+```go
+// waitNumGoroutine は、ゴールーチン数がwant以下になるまで、timeoutを上限に待つ。
+// want以下になったらtrueを、ならなかったらfalseを返す。
+func waitNumGoroutine(want int, timeout time.Duration) bool {
+	// ...
+}
+```
+
+`TODO`コメントに従って、`search/search_test.go`の`waitNumGoroutine`関数と`TestFirst`関数を実装してください。
+`waitNumGoroutine`関数は、10ミリ秒ごとに`runtime.NumGoroutine`関数を呼び出して調べます。
+`TestFirst`関数では、`First`関数を呼び出す前のゴールーチン数を取得し、呼び出したあとに`waitNumGoroutine`関数で1秒まで待ちます。
+数が戻らなかったら、実行前と実行後の数を示してテストを失敗させます。
 
 ## 動かす
 
-次のコマンドでテストを実行します。
+テストを実行します。
 
 ```
 $ go test -race ./...
 ```
 
-テストが失敗し、次のように、残っているゴールーチンの状態とスタックトレースが表示されれば成功です。
+次のように、テストが失敗すれば成功です。
 
 ```
---- FAIL: TestFirst (0.44s)
-    search_test.go:36: found unexpected goroutines:
-        [Goroutine 38 in state chan send, with github.com/gohandson/goroutineleak-ja/search.First.func1 on top of the stack:
-        github.com/gohandson/goroutineleak-ja/search.First.func1()
-        	/.../search/search.go:21 +0x96
-        created by github.com/gohandson/goroutineleak-ja/search.First in goroutine 36
-        	/.../search/search.go:19 +0x6b
-         Goroutine 39 in state chan send, with ...
-        ]
+--- FAIL: TestFirst (1.01s)
+    search_test.go:51: ゴールーチンがリークしています: 実行前=2, 実行後=4
 FAIL
 ```
 
-表示された内容から、次のことが分かります。
-
-* `chan send`の状態、つまりチャネルへの送信でブロックしている
-* ブロックしているのは`search.First`関数の中で起動された関数である
-* `search.go`の21行目（`ch <- result{val: v, err: err}`）でブロックしている
-* 2つのゴールーチンがリークしている
+STEP 01では`PASS`していたテストが、リークを検出して失敗するようになりました。
+1秒待っても、遅いバックエンドのゴールーチンが終了しなかったためです。
 
 このステップの解答例では、テストが失敗する状態のままにしています。
-リークを直すのはSTEP 04です。
+リークを直すのはSTEP 06です。
 
-## goleakの仕組み
+## サーバのゴールーチン数を観察する
 
-`goleak.VerifyNone`関数は、`runtime.Stack`関数で全ゴールーチンのスタックトレースを取得し、テストに関係のないゴールーチン（テストを動かすためのゴールーチンなど）を除いたものを、リークしている疑いのあるゴールーチンとして報告します。
+動いているサーバのリークは、ゴールーチン数の推移を見ることでも気づけます。
+`cmd/monitor/main.go`は、`search.First`関数を100ミリ秒ごとに繰り返し呼び出すサーバです。
+`First`関数を呼び出すたびに、2つのゴールーチンがリークします。
 
-検査を行うのは、`VerifyNone`関数が呼び出されたとき、つまり、このテストでは`TestFirst`関数が終わるときです。
-ゴールーチンはすぐには終了しないことがあるため、goleakは残っているゴールーチンがなくなるまで、間隔を空けて何度か調べ直します。
-それでも残っているものを、リークとして報告します。
-テストが失敗するまでに0.4秒ほどかかったのは、このリトライを行っているためです。
+このサーバに、次の2つを追加します。
 
-この仕組みには、次の特徴があります。
+* `expvar`パッケージで、ゴールーチン数を`goroutines`という変数として公開する
+* ゴールーチン数を、1秒ごとにログへ出力する
 
-* リークしたゴールーチンがブロックしている理由は問わない（チャネルでも、ロックでも、I/Oでも、スリープでも、終了していなければ報告される）
-* 終了を待つだけなので、本当にリークしているのか、単に終了が遅いだけなのかは区別できない
-* テストの終わりという決まったタイミングで調べるため、テストが終わらないと検査できない
+`expvar`パッケージは、プログラムの変数をHTTPで公開するための標準パッケージです。
+`expvar.Publish`関数で変数を登録すると、`net/http`パッケージのデフォルトのサーバの`/debug/vars`から、JSON形式で取得できます。
+`expvar.Func`型を使うと、取得されるたびに関数を呼び出して値を返せるので、ゴールーチン数のように変化する値の公開に向いています。
 
-## 本番で動くプログラムにも使えるか
+```go
+expvar.Publish("goroutines", expvar.Func(func() any {
+	return runtime.NumGoroutine()
+}))
+```
 
-goleakは、テストコードの中で使うためのライブラリです。
-「このテストが終わった時点では、ゴールーチンは1つも残っていないはずだ」という前提で検査するからです。
+`TODO`コメントに従って、`cmd/monitor/main.go`を実装してください。
+`http.ListenAndServe`関数が、第2引数に`nil`を渡して`http.DefaultServeMux`を使っているため、`/debug/vars`は自動で公開されます。
 
-一方、本番で動いているサーバでは、リクエストを処理するゴールーチンなど、終了していなくて当たり前のゴールーチンがたくさんあります。
-そのため、「終了していないゴールーチンがある」ことだけでは、リークかどうかを判断できません。
+サーバを起動します。
 
-また、テストでは再現しなかったリークが、本番の特定の入力やタイミングでだけ起きることもあります。
-本番で動いているプログラムのリークを調べるための方法を、次のSTEP 03で学びます。
+```
+$ go run ./cmd/monitor
+```
+
+ゴールーチン数が、ログに1秒ごとに出力されます。
+数がどんどん増えていくことが分かります。
+
+```
+2026/10/16 18:24:21 goroutines: 21
+2026/10/16 18:24:22 goroutines: 39
+2026/10/16 18:24:23 goroutines: 60
+```
+
+別のターミナルから、`expvar`で公開した値を取得することもできます。
+
+```
+$ curl -s http://localhost:6060/debug/vars | grep goroutines
+"goroutines": 69,
+```
+
+実際のサービスでは、この値を監視ツールに定期的に取り込んで、グラフにして推移を見ます。
+右肩上がりに増え続けていれば、リークの疑いがあります。
+
+## ゴールーチン数を数える方法の限界
+
+ここまでで、ゴールーチン数を数えるだけでも、リークの存在に気づけることが分かりました。
+一方で、この方法には次のような限界があります。
+
+* どのゴールーチンがリークしているのか、どこでブロックしているのかは分からない
+* 他のゴールーチンの増減の影響を受ける。テスト中に別のゴールーチンが動いていると、数が合わなくなる
+* 数が戻るのを待つ時間を決める必要がある。短すぎると誤検出し、長すぎるとテストが遅くなる
+* 本番では、アクセスが増えただけでもゴールーチン数は増えるので、リークによる増加と区別できない
+
+次のSTEP 03では、リークしたゴールーチンそのものを報告してくれるライブラリのgoleakを使います。
 
 ## 考えてみよう
 
-* goleakはいつ、何をチェックしているか
-* 本番環境で動いているプログラムには使えるか
-* 遅いバックエンドの待ち時間を長くすると、テストの結果はどう変わるか
+* `waitNumGoroutine`関数で待たずに、`First`関数の直後にゴールーチン数を比べると、リークしていなくても失敗するのはなぜか
+* `waitNumGoroutine`関数のタイムアウトを短くすると、`TestFirst`関数はどうなるか
+* テストで`t.Parallel`関数を使って複数のテストを並行して動かすと、この方法はどうなるか
+* ゴールーチン数が増えているサーバで、リークと単なるアクセスの増加を区別するには、何を見ればよいか
 
 ## トラブルシューティング
 
-### `goleak`が見つからないというエラーが出る
+### `TestFirst`が成功してしまう
 
-`go get go.uber.org/goleak`を、`go.mod`のあるディレクトリ（`skeleton/step02`）で実行してください。
-インポートのパスは`go.uber.org/goleak`です。
-
-### テストが成功してしまう
-
-`defer goleak.VerifyNone(t)`が`TestFirst`関数の先頭に書かれているか確認してください。
+`waitNumGoroutine`関数の戻り値を確認してください。
+戻り値が`true`のときに成功、`false`のときに失敗とするのが正しい動作です。
 また、`search/search.go`を修正していないか確認してください。
 このステップでは、`search/search.go`はSTEP 01から変えません。
 
+### `TestFirst`が毎回失敗する
+
+`First`関数を呼び出す前に、ゴールーチン数を取得しているか確認してください。
+呼び出したあとに取得すると、リークしたあとの数を基準にしてしまいます。
+
+### ポート6060がすでに使われている
+
+前のステップで起動したサーバを止め忘れていないか確認してください。
+
+### `/debug/vars`が見つからない
+
+`http.ListenAndServe`関数の第2引数が`nil`になっているか確認してください。
+`nil`のとき、`http.DefaultServeMux`が使われ、`expvar`パッケージが登録したハンドラが有効になります。
+
 ## 参考文献
 
-* [goleak - GitHub](https://github.com/uber-go/goleak)
-* [goleak - pkg.go.dev](https://pkg.go.dev/go.uber.org/goleak)
-* [Goroutine Leak Profiles - The Go Blog](https://go.dev/blog/goroutine-leak-profiles)
+* [runtime.NumGoroutine - pkg.go.dev](https://pkg.go.dev/runtime#NumGoroutine)
+* [expvar - pkg.go.dev](https://pkg.go.dev/expvar)
 
 ---
 

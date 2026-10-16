@@ -10,16 +10,10 @@ import (
 	"github.com/gohandson/goroutineleak-ja/search"
 )
 
-// backend はd後にvを返すバックエンドを返す。
-// ctxがキャンセルされたら、待つのをやめて戻る。
 func backend(d time.Duration, v string) search.Backend {
 	return func(ctx context.Context, query string) (string, error) {
-		select {
-		case <-time.After(d):
-			return v, nil
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
+		time.Sleep(d)
+		return v, nil
 	}
 }
 

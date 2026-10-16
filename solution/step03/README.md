@@ -1,150 +1,132 @@
-# STEP 03: pprofで見つけよう
+# STEP 03: goleakで見つけよう
 
 ## このステップで学ぶこと
 
-STEP 02では、goleakを使ってテストの中でリークを見つけました。
-しかし、テストでは再現しなかったリークが、本番で動いているプログラムでだけ起きることもあります。
+STEP 02では、`runtime.NumGoroutine`関数でゴールーチン数を比べて、リークを検出するテストを書きました。
+しかしこの方法では、リークしたことは分かっても、どのゴールーチンがどこでリークしているのかまでは分かりません。
+また、他のゴールーチンの増減に影響されるため、テストの自動チェックには向きません。
 
-Go 1.27から、リークしたゴールーチンだけを報告するプロファイル、`goroutineleak`プロファイルが使えるようになりました。
-STEP 03では、リークするサーバを動かし、このプロファイルでリークを見つけます。
+STEP 03では、[goleak](https://github.com/uber-go/goleak)というライブラリを使って、テストの中でゴールーチンリークを検出します。
 その過程で、次のことを学びます。
 
-* `net/http/pprof`パッケージによるpprofエンドポイントの公開
-* `goroutineleak`プロファイルの取得と、`go tool pprof`での読み方
-* 通常の`goroutine`プロファイルとの違い
+* goleakの使い方
+* goleakが検出する仕組みと、検出できるタイミング
+* テストで見つけられるリークと、本番で動くプログラムのリークの違い
 
-## goroutineleakプロファイルの仕組み
+## goleakを取得する
 
-これまでも、`goroutine`プロファイルを使えば、プログラムが動いている最中のゴールーチンの一覧を見ることができました。
-しかし、`goroutine`プロファイルには、リークしているゴールーチンと、たまたま一時的にブロックしているだけのゴールーチンの区別がありません。
-たとえば、アクセスが増えて、大量のリクエストが一時的にDBの応答待ちでブロックしているだけの場合でも、同じように並びます。
+goleakは、テストが終わったあとに終了していないゴールーチンが残っていないかを調べるライブラリです。
+Uberが公開しています。
 
-`goroutineleak`プロファイルは、ガベージコレクション（GC）の仕組みを使って、リークしているゴールーチンだけを見つけます。
-考え方は次のとおりです。
+まず、goleakを取得します。
 
-* ブロックしていないゴールーチンは、動き続けられるので、リークしていない
-* ブロックしているゴールーチンでも、それが待っているチャネルなどを、動き続けられるゴールーチンが参照していれば、いずれ待ちが解消される可能性があるので、リークしていない
-* 上のどちらにも当てはまらないゴールーチン、つまり、待っているチャネルなどを動けるゴールーチンから誰も参照できなくなったものは、永遠に待ち続けるのでリークしている
+```
+$ go get go.uber.org/goleak
+```
 
-誰も参照していないチャネルを待っているゴールーチンは、確実にリークしているといえます。
-そのため、`goroutineleak`プロファイルでは、リークしていないものがリークとして報告される誤検出は、ほとんど起きないよう設計されています。
+`go.mod`に`go.uber.org/goleak`が追加されます。
 
-一方で、検出できるリークの種類は限られています。
-どのようなリークが検出できて、どのようなリークが検出できないかは、STEP 06で試します。
+## テストにgoleakを追加する
 
-## pprofのエンドポイントを公開する
+`search/search_test.go`に`go.uber.org/goleak`のインポートを追加します。
+そして、`TestFirst`関数の先頭に、次の1行を追加します。
 
-`net/http/pprof`パッケージをインポートすると、`http.DefaultServeMux`に`/debug/pprof/`以下のハンドラが登録されます。
-`goroutineleak`プロファイルも、Go 1.27以降では、このパッケージをインポートするだけで`/debug/pprof/goroutineleak`から取得できるようになります。
+```go
+defer goleak.VerifyNone(t)
+```
 
-`cmd/server/main.go`は、`search.First`関数を100ミリ秒ごとに繰り返し呼び出すサーバです。
-バックエンドは10ミリ秒、50ミリ秒、50ミリ秒かかる3つで、`First`関数を呼び出すたびに、遅い2つのゴールーチンがリークします。
+`goleak.VerifyNone`関数は、呼び出された時点で動いているゴールーチンを調べ、テストの実行中に起動されて、まだ終了していないゴールーチンがあれば、テストを失敗させます。
+`defer`で呼び出しているため、`TestFirst`関数が終わるときに検査が行われます。
 
-`TODO`コメントに従って、次の処理を追加してください。
-
-1. `net/http/pprof`パッケージを、`_`をつけて空白インポートする（`net/http`パッケージのインポートも必要です）
-2. 別のゴールーチンで、`http.ListenAndServe`関数を使って`localhost:6060`で待ち受ける
-
-`http.ListenAndServe`関数は、第2引数に`nil`を渡すと`http.DefaultServeMux`を使います。
-エラーが返ってきたときは、`log.Println`関数で出力してください。
+なお、STEP 02で書いた`runtime.NumGoroutine`関数による確認は、このステップではgoleakに置き換えます。
+`TestFirst`関数から、ゴールーチン数を取得する処理と`waitNumGoroutine`関数の呼び出しを取り除いてください。
+`waitNumGoroutine`関数も不要になります。
 
 ## 動かす
 
-サーバを起動します。
+次のコマンドでテストを実行します。
 
 ```
-$ go run ./cmd/server
+$ go test -race ./...
 ```
 
-起動したまま、別のターミナルを開いて、`goroutineleak`プロファイルを取得します。
+テストが失敗し、次のように、残っているゴールーチンの状態とスタックトレースが表示されれば成功です。
 
 ```
-$ curl -o leak.prof http://localhost:6060/debug/pprof/goroutineleak
+--- FAIL: TestFirst (0.44s)
+    search_test.go:36: found unexpected goroutines:
+        [Goroutine 38 in state chan send, with github.com/gohandson/goroutineleak-ja/search.First.func1 on top of the stack:
+        github.com/gohandson/goroutineleak-ja/search.First.func1()
+        	/.../search/search.go:21 +0x96
+        created by github.com/gohandson/goroutineleak-ja/search.First in goroutine 36
+        	/.../search/search.go:19 +0x6b
+         Goroutine 39 in state chan send, with ...
+        ]
+FAIL
 ```
 
-取得したプロファイルは、`go tool pprof`で調べられます。
-`-list`には正規表現を渡し、一致する関数のソースコードに、サンプル数を重ねて表示できます。
+表示された内容から、次のことが分かります。
 
-```
-$ go tool pprof -list 'search.First' leak.prof
-```
+* `chan send`の状態、つまりチャネルへの送信でブロックしている
+* ブロックしているのは`search.First`関数の中で起動された関数である
+* `search.go`の21行目（`ch <- result{val: v, err: err}`）でブロックしている
+* 2つのゴールーチンがリークしている
 
-次のように、`ch <- result{val: v, err: err}`の行にサンプルが集まっていれば成功です。
-`Total`の数は、取得した時点までにリークしたゴールーチン数なので、実行するたびに変わります。
+このステップの解答例では、テストが失敗する状態のままにしています。
+リークを直すのはSTEP 06です。
 
-```
-Total: 54
-ROUTINE ======================== github.com/gohandson/goroutineleak-ja/search.First.func1 in .../search/search.go
-         0         54 (flat, cum)   100% of Total
-         .          .     19:		go func() {
-         .          .     20:			v, err := b(ctx, query)
-         .         54     21:			ch <- result{val: v, err: err}
-         .          .     22:		}()
-```
+## goleakの仕組み
 
-この結果から、リークの原因が`ch`への送信であることが分かります。
+ここでは仕組みの概要だけを説明します。次のSTEP 04で、自分で実装しながら詳しく調べます。
 
-テキスト形式で内容を確認したいときは、`debug=1`をつけて取得します。
+`goleak.VerifyNone`関数は、`runtime.Stack`関数で全ゴールーチンのスタックトレースを取得し、テストに関係のないゴールーチン（テストを動かすためのゴールーチンなど）を除いたものを、リークしている疑いのあるゴールーチンとして報告します。
 
-```
-$ curl 'http://localhost:6060/debug/pprof/goroutineleak?debug=1'
-```
+検査を行うのは、`VerifyNone`関数が呼び出されたとき、つまり、このテストでは`TestFirst`関数が終わるときです。
+ゴールーチンはすぐには終了しないことがあるため、goleakは残っているゴールーチンがなくなるまで、間隔を空けて何度か調べ直します。
+それでも残っているものを、リークとして報告します。
+テストが失敗するまでに0.4秒ほどかかったのは、このリトライを行っているためです。
 
-`goroutineleak profile: total 54`のような見出しに続いて、スタックトレースごとにゴールーチン数が並びます。
+この仕組みには、次の特徴があります。
 
-ブラウザで http://localhost:6060/debug/pprof/ を開いて、`goroutineleak`のリンクから確認することもできます。
+* リークしたゴールーチンがブロックしている理由は問わない（チャネルでも、ロックでも、I/Oでも、スリープでも、終了していなければ報告される）
+* 終了を待つだけなので、本当にリークしているのか、単に終了が遅いだけなのかは区別できない
+* テストの終わりという決まったタイミングで調べるため、テストが終わらないと検査できない
 
-## 通常のgoroutineプロファイルと比べる
+## 本番で動くプログラムにも使えるか
 
-同じサーバから、通常の`goroutine`プロファイルも取得して、比べてみましょう。
+goleakは、テストコードの中で使うためのライブラリです。
+「このテストが終わった時点では、ゴールーチンは1つも残っていないはずだ」という前提で検査するからです。
 
-```
-$ curl 'http://localhost:6060/debug/pprof/goroutine?debug=1' | head -20
-```
+一方、本番で動いているサーバでは、リクエストを処理するゴールーチンなど、終了していなくて当たり前のゴールーチンがたくさんあります。
+そのため、「終了していないゴールーチンがある」ことだけでは、リークかどうかを判断できません。
 
-`goroutine`プロファイルには、リークしたゴールーチンのほかに、pprofのHTTPサーバのゴールーチンや、`main`関数のゴールーチンなど、リークしていないゴールーチンも含まれます。
-一方、`goroutineleak`プロファイルには、リークしたゴールーチンだけが含まれます。
-
-しばらく待ってから、再度`goroutineleak`プロファイルを取得すると、`Total`の数が増えていることも確認できます。
-`First`関数は100ミリ秒ごとに呼び出されて、そのたびに2つずつリークするためです。
-このように、リークは時間が経つほど増えていきます。
+また、テストでは再現しなかったリークが、本番の特定の入力やタイミングでだけ起きることもあります。
+本番で動いているプログラムのリークを調べるための方法は、STEP 05で学びます。
 
 ## 考えてみよう
 
-* どの行でリークしているか
-* 時間が経つと数はどう変わるか
-* 通常の`goroutine`プロファイルと何が違うか
-* pprofのエンドポイントを本番環境で公開するときに、気をつけるべきことは何か
+* goleakはいつ、何をチェックしているか
+* 本番環境で動いているプログラムには使えるか
+* 遅いバックエンドの待ち時間を長くすると、テストの結果はどう変わるか
 
 ## トラブルシューティング
 
-### ポート6060がすでに使われている
+### `goleak`が見つからないというエラーが出る
 
-`address already in use`というログが出る場合は、前に起動したサーバが残っているか、別のプログラムがポート6060を使っています。
-前のステップで起動したサーバを`Ctrl+C`で止め忘れていないか確認してください。
+`go get go.uber.org/goleak`を、`go.mod`のあるディレクトリ（`skeleton/step03`）で実行してください。
+インポートのパスは`go.uber.org/goleak`です。
 
-### goroutineleakプロファイルが空になる
+### テストが成功してしまう
 
-起動した直後は、まだリークが発生していません。
-数秒待ってから取得してください。
-また、Goのバージョンが1.27以上であることを`go version`で確認してください。
-
-### `go test ./...`が失敗する
-
-STEP 02で追加した`goleak`のテストは、まだリークを直していないため、このステップでも失敗します。
-リークの修正は、次のSTEP 04で行います。
-
-### サーバが止まらない
-
-`go run ./cmd/server`で起動したサーバは、`Ctrl+C`で止められます。
+`defer goleak.VerifyNone(t)`が`TestFirst`関数の先頭に書かれているか確認してください。
+また、`search/search.go`を修正していないか確認してください。
+このステップでは、`search/search.go`はSTEP 01から変えません。
 
 ## 参考文献
 
+* [goleak - GitHub](https://github.com/uber-go/goleak)
+* [goleak - pkg.go.dev](https://pkg.go.dev/go.uber.org/goleak)
 * [Goroutine Leak Profiles - The Go Blog](https://go.dev/blog/goroutine-leak-profiles)
-* [net/http/pprof - pkg.go.dev](https://pkg.go.dev/net/http/pprof)
-* [runtime/pprof - pkg.go.dev](https://pkg.go.dev/runtime/pprof)
-* [Profiling Go Programs - The Go Blog](https://go.dev/blog/pprof)
-* [pprof - GitHub](https://github.com/google/pprof)
 
 ---
 

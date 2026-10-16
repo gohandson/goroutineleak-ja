@@ -27,7 +27,9 @@ $ go1.27.1 download
 このハンズオンを行うと以下のことが学べます。
 
 * ゴールーチンリークが起きる仕組み
+* `runtime.NumGoroutine`関数と`expvar`パッケージによる、ゴールーチン数の観察
 * goleakによる、テストでのリークの検出
+* スタックトレースの読み方と、goleakが内部でリークを見つける仕組み
 * Go 1.27で追加された`goroutineleak`プロファイルによる、動いているプログラムのリークの検出
 * バッファ付きチャネルやコンテキストによる、リークの直し方
 * `goroutineleak`プロファイルで検出できるリークと、できないリーク
@@ -43,12 +45,12 @@ $ go1.27.1 download
 * IDEやエディタの設定
 * Goの基本的な文法
 * ゴールーチンとチャネルの基本的な使い方
-* Datadogの導入方法（STEP 07では考え方の紹介にとどめます）
+* Datadogの導入方法（STEP 09では考え方の紹介にとどめます）
 
 ## ハンズオンのやりかた
 
-`skeleton`ディレクトリ以下に問題があり、7つのステップに分けられています。
-STEP 01からSTEP 07までステップごとに進めていくことで、ゴールーチンリークに関する知識が学べます。
+`skeleton`ディレクトリ以下に問題があり、9つのステップに分けられています。
+STEP 01からSTEP 09までステップごとに進めていくことで、ゴールーチンリークに関する知識が学べます。
 
 各ステップに、READMEが用意されていますので、まずは`README`を読みます。
 `README`には、そのステップを理解するための解説が書かれています。
@@ -64,12 +66,14 @@ STEP 01からSTEP 07までステップごとに進めていくことで、ゴー
 ## 目次
 
 * STEP 01: [リークするコードを読もう](./skeleton/step01)（[解答例](./solution/step01)）
-* STEP 02: [goleakで見つけよう](./skeleton/step02)（[解答例](./solution/step02)）
-* STEP 03: [pprofで見つけよう](./skeleton/step03)（[解答例](./solution/step03)）
-* STEP 04: [リークを直そう](./skeleton/step04)（[解答例](./solution/step04)）
-* STEP 05: [コンテキストでキャンセルしよう](./skeleton/step05)（[解答例](./solution/step05)）
-* STEP 06: [見つからないリークを知ろう](./skeleton/step06)（[解答例](./solution/step06)）
-* STEP 07: [本番で監視しよう](./skeleton/step07)（[解答例](./solution/step07)）
+* STEP 02: [NumGoroutineで見つけよう](./skeleton/step02)（[解答例](./solution/step02)）
+* STEP 03: [goleakで見つけよう](./skeleton/step03)（[解答例](./solution/step03)）
+* STEP 04: [goleakの仕組みを調べよう](./skeleton/step04)（[解答例](./solution/step04)）
+* STEP 05: [pprofで見つけよう](./skeleton/step05)（[解答例](./solution/step05)）
+* STEP 06: [リークを直そう](./skeleton/step06)（[解答例](./solution/step06)）
+* STEP 07: [コンテキストでキャンセルしよう](./skeleton/step07)（[解答例](./solution/step07)）
+* STEP 08: [見つからないリークを知ろう](./skeleton/step08)（[解答例](./solution/step08)）
+* STEP 09: [本番で監視しよう](./skeleton/step09)（[解答例](./solution/step09)）
 
 ## よくあるつまずきポイント
 

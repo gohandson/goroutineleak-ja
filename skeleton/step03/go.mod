@@ -2,7 +2,7 @@ module github.com/gohandson/goroutineleak-ja
 
 go 1.27.1
 
-require go.uber.org/goleak v1.3.0
+tool golang.org/x/tools/cmd/goimports
 
 require (
 	golang.org/x/mod v0.42.0 // indirect
@@ -11,5 +11,3 @@ require (
 	golang.org/x/telemetry v0.0.0-20261009151841-97e8ea77aa2a // indirect
 	golang.org/x/tools v0.52.0 // indirect
 )
-
-tool golang.org/x/tools/cmd/goimports
